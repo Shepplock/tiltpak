@@ -59,6 +59,7 @@ canvas{display:block;width:100%;height:100%;border-radius:2px}
   color:#fff;font-size:12.5px;text-shadow:0 1px 3px rgba(0,0,0,.7);pointer-events:none}
 #osd .dot{width:9px;height:9px;border-radius:50%;background:var(--rec)}
 #osd[hidden]{display:none}
+#osd.preview .dot,#osd.preview #tc{display:none}
 @keyframes blink{50%{opacity:.15}}
 #osd .dot{animation:blink 1.1s steps(1,end) infinite}
 @media (prefers-reduced-motion:reduce){#osd .dot{animation:none}}
@@ -206,13 +207,15 @@ hr{border:0;border-top:1px solid rgba(0,0,0,.12);margin:12px 0}
   <hr>
   <div class="row"><label>Accéléré</label>
     <div class="seg" id="speed"><button data-v="1" aria-pressed="true">1×</button><button data-v="2">2×</button><button data-v="4">4×</button><button data-v="8">8×</button><button data-v="16">16×</button></div></div>
+  <div class="row"><label>Boucle</label>
+    <div class="seg" id="loops"><button data-v="1" aria-pressed="true">1×</button><button data-v="2">2×</button><button data-v="3">3×</button><button data-v="4">4×</button></div></div>
   <div class="row"><label>Définition</label>
     <div class="seg" id="qual"><button data-v="720">720p</button><button data-v="1080" aria-pressed="true">1080p</button><button data-v="1440">1440p</button></div></div>
   <div class="row"><label>Son</label>
     <div class="seg" id="audio"><button data-v="0" aria-pressed="true">Coupé</button><button data-v="1">Micro</button></div></div>
   <div class="row"><label>Habillage</label>
     <div class="seg" id="skin"><button data-v="tapis" aria-pressed="true">Tapis</button><button data-v="sprue">Sprue</button><button data-v="nuit">Nuit</button></div></div>
-  <p class="hint">Sur l'aperçu&nbsp;: un doigt déplace la zone nette, deux doigts règlent sa largeur et son inclinaison. L'accéléré ne s'applique qu'aux vidéos importées.</p>
+  <p class="hint">Sur l'aperçu&nbsp;: un doigt déplace la zone nette, deux doigts règlent sa largeur et son inclinaison. L'accéléré et la boucle ne s'appliquent qu'aux vidéos importées. Si l'export saccade, descends la définition à 720p.</p>
 </div>
 
 <div id="result">
@@ -239,9 +242,10 @@ const clamp = (v,a,b) => v<a?a:v>b?b:v;
 const P = {
   shape:0, cx:.5, cy:.5, width:.20, feather:.18, angle:0, ry:1.6,
   blur:16, sat:1.45, con:1.15, exp:.04, warm:.15, vig:.25,
-  speed:1, qual:1080, audio:0, mirror:true
+  speed:1, loops:1, qual:1080, audio:0, mirror:true
 };
 let mode='cam', facing='environment', camStream=null, busy=false, compare=false;
+let exporting=false, sizeLocked=false;
 
 const PRESETS = {
   diorama:{shape:0,width:.20,feather:.18,blur:18,sat:1.45,con:1.15,exp:.04,warm:.15,vig:.25},
@@ -365,6 +369,7 @@ function makeFBO(w,h){
 function delFBO(o){ if(o){ gl.deleteTexture(o.t); gl.deleteFramebuffer(o.f); } }
 
 function setSize(w,h){
+  if(sizeLocked || !w || !h) return;
   const max = mode==='img' ? 2560 : P.qual;
   const k = Math.min(1, max/Math.max(w,h));
   w = Math.max(2, Math.round(w*k/2)*2); h = Math.max(2, Math.round(h*k/2)*2);
@@ -447,7 +452,7 @@ function loop(){
   if(mode==='cam'){
     if(camEl.readyState>=2){ setSize(camEl.videoWidth,camEl.videoHeight); drawFrame(camEl); }
   } else if(mode==='vid'){
-    if(srcEl.readyState>=2){ setSize(srcEl.videoWidth,srcEl.videoHeight); drawFrame(srcEl); }
+    if(!exporting && srcEl.readyState>=2){ setSize(srcEl.videoWidth,srcEl.videoHeight); drawFrame(srcEl); }
   } else if(mode==='img' && hasImg){
     setSize(imgEl.naturalWidth,imgEl.naturalHeight);
     if(needStill){ drawFrame(imgEl); } else { drawFrame(null); }
@@ -577,7 +582,14 @@ function seg(id, cb){
   });
 }
 seg('shape', v=>{ P.shape = +v; drawGuide(); showGuide(); });
-seg('speed', v=>{ P.speed = +v; });
+seg('speed', v=>{ P.speed = +v; applyPreviewSpeed(); });
+seg('loops', v=>{ P.loops = +v; applyPreviewSpeed(); });
+function applyPreviewSpeed(){
+  if(exporting) return;
+  srcEl.playbackRate = P.speed;
+  $('#sub').textContent = (P.speed>1 ? P.speed+'× ' : '') + (P.loops>1 ? '↻ '+P.loops : '');
+  showPreviewOsd();
+}
 seg('qual',  v=>{ P.qual = +v; canvas.width=0; });
 seg('audio', v=>{ P.audio = +v; if(mode==='cam') startCam(); });
 seg('skin',  v=>{ document.body.dataset.skin = v; });
@@ -655,7 +667,7 @@ function startRec(extraAudio){
   rec.start(250);
   recording = true; recStart = performance.now();
   document.body.classList.add('recording');
-  $('#osd').hidden = false;
+  $('#osd').hidden = false; $('#osd').classList.remove('preview');
 }
 function stopRec(){
   return new Promise(res=>{
@@ -666,7 +678,7 @@ function stopRec(){
       recording=false; rec=null;
       if(recStream){ recStream.getTracks().forEach(t=>{ if(t.kind==='video') t.stop(); }); recStream=null; }
       document.body.classList.remove('recording');
-      $('#osd').hidden = true;
+      showPreviewOsd();
       res(blob);
     };
     rec.stop();
@@ -678,6 +690,12 @@ function tick(){
 }
 
 /* ======================= import ======================= */
+function showPreviewOsd(){
+  const osd = $('#osd');
+  const on = mode==='vid' && srcEl.src && (P.speed>1 || P.loops>1);
+  osd.classList.toggle('preview', on);
+  osd.hidden = !on;
+}
 let srcObjURL = null;
 $('#pick').addEventListener('change', e=>{
   const f = e.target.files && e.target.files[0];
@@ -700,11 +718,12 @@ function loadVideo(f){
   srcEl.onloadedmetadata = ()=>{
     if(!srcEl.videoWidth){ srcEl.onerror(); return; }
     em.hidden = true; frame.hidden = false;
-    $('#sub').textContent = f.name.slice(0,26);
     canvas.width = 0;
+    srcEl.playbackRate = P.speed;
+    applyPreviewSpeed();
     srcEl.play().catch(()=>{});
   };
-  srcEl.loop = true; srcEl.muted = true; srcEl.playbackRate = 1;
+  srcEl.loop = true; srcEl.muted = true; srcEl.playbackRate = P.speed;
   srcEl.src = srcObjURL;
   srcEl.load();
 }
@@ -741,7 +760,8 @@ function setMode(m){
     shut.dataset.kind='save'; shut.setAttribute('aria-label','Exporter');
     $('#empty').textContent = m==='vid' ? 'Ouvrez une vidéo à convertir.' : 'Ouvrez une photo.';
     $('#empty').hidden = false; frame.hidden = true;
-    if(m==='vid' && srcEl.src){ $('#empty').hidden=true; frame.hidden=false; srcEl.play().catch(()=>{}); }
+    if(m==='vid' && srcEl.src){ $('#empty').hidden=true; frame.hidden=false; srcEl.play().catch(()=>{}); applyPreviewSpeed(); }
+    else showPreviewOsd();
     if(m==='img' && hasImg){ $('#empty').hidden=true; frame.hidden=false; needStill=true; }
   }
 }
@@ -774,53 +794,103 @@ shutter.addEventListener('click', async ()=>{
   else if(mode==='img'){ exportPhoto(); }
 });
 
+function seekTo(t){
+  return new Promise(res=>{
+    let done = false;
+    const fin = ()=>{ if(done) return; done = true; srcEl.removeEventListener('seeked',fin); clearTimeout(to); res(); };
+    const to = setTimeout(fin, 1500);
+    srcEl.addEventListener('seeked', fin);
+    try{ srcEl.currentTime = t; }catch(e){ fin(); }
+  });
+}
+
 async function exportVideo(){
   if(!srcEl.src){ $('#pick').click(); return; }
   busy = true; document.body.classList.add('busy');
   shutter.disabled = true; sheet.classList.remove('open');
+
   const wasLoop = srcEl.loop;
-  srcEl.loop = false; srcEl.muted = true;
-  srcEl.pause(); srcEl.currentTime = 0;
-  await new Promise(r=>{ const h=()=>{srcEl.removeEventListener('seeked',h);r();}; srcEl.addEventListener('seeked',h); setTimeout(r,600); });
+  srcEl.loop = false; srcEl.muted = true; srcEl.pause();
+  await seekTo(0);
+
+  // taille figée pendant tout l'export : redimensionner le canvas casse le flux capturé
+  setSize(srcEl.videoWidth, srcEl.videoHeight);
+  exporting = true; sizeLocked = true;
+  drawFrame(srcEl);
 
   let audioTrack = null;
-  if(P.speed===1 && srcEl.captureStream){
+  if(P.speed === 1 && P.loops === 1 && srcEl.captureStream){
     try{
       srcEl.muted = false; srcEl.volume = 1;
       audioTrack = srcEl.captureStream().getAudioTracks()[0] || null;
     }catch(e){ srcEl.muted = true; }
   }
+
+  const dur = srcEl.duration || 0;
+  const total = dur / P.speed * P.loops;
+  const ring = $('#prog circle');
+  const rvfc = typeof srcEl.requestVideoFrameCallback === 'function';
+  let pass = 0, finished = false, lastDraw = 0, pending = false;
+
+  const step = ()=>{
+    pending = false;
+    if(finished) return;
+    const now = performance.now();
+    if(now - lastDraw >= 30){ lastDraw = now; drawFrame(srcEl); }   // plafonné à ~32 i/s
+    const el = (pass*dur + srcEl.currentTime) / P.speed;
+    ring.setAttribute('stroke-dashoffset', String(100 - Math.min(1, total ? el/total : 0)*100));
+    schedule();
+  };
+  const schedule = ()=>{
+    if(finished || pending) return;
+    pending = true;
+    if(rvfc) srcEl.requestVideoFrameCallback(step); else requestAnimationFrame(step);
+  };
+
   startRec(audioTrack);
   srcEl.playbackRate = P.speed;
-  $('#sub').textContent = P.speed>1 ? P.speed+'×' : '';
-  const ring = $('#prog circle');
-  const done = new Promise(res=>{
-    let finished = false;
-    const stop = ()=>{ if(finished) return; finished = true; clearInterval(guard); res(); };
-    const upd = ()=>{
-      const p = srcEl.duration ? srcEl.currentTime/srcEl.duration : 0;
-      ring.setAttribute('stroke-dashoffset', String(100-p*100));
-      if(!finished && recording) requestAnimationFrame(upd);
-    };
-    // iOS ne déclenche pas toujours 'ended' à vitesse élevée : on surveille aussi la position.
+  $('#sub').textContent = (P.speed>1 ? P.speed+'× ' : '') + (P.loops>1 ? 'boucle 1/'+P.loops : '');
+
+  await new Promise(res=>{
+    let handling = false;
+    const cleanup = ()=>{ clearInterval(guard); clearTimeout(kill); srcEl.removeEventListener('ended', onEnd); };
+    const stop = ()=>{ if(finished) return; finished = true; cleanup(); res(); };
+    async function onEnd(){
+      if(handling || finished) return;
+      handling = true;
+      pass++;
+      if(pass >= P.loops){ stop(); return; }
+      $('#sub').textContent = (P.speed>1 ? P.speed+'× ' : '') + 'boucle ' + (pass+1) + '/' + P.loops;
+      await seekTo(0);
+      if(finished) return;
+      srcEl.playbackRate = P.speed;
+      try{ await srcEl.play(); }catch(e){ stop(); return; }
+      handling = false;
+      schedule();
+    }
+    // iOS ne declenche pas toujours 'ended' a vitesse elevee
     const guard = setInterval(()=>{
-      if(srcEl.ended) stop();
-      else if(srcEl.duration && srcEl.currentTime >= srcEl.duration - .08) stop();
-      else if(srcEl.currentTime > .2 && srcEl.paused) stop();
-    }, 200);
-    srcEl.addEventListener('ended', stop, {once:true});
-    srcEl.play().then(upd).catch(()=>{
+      if(handling || finished || srcEl.seeking) return;
+      if(srcEl.duration && srcEl.currentTime >= srcEl.duration - .08) onEnd();
+      else if(srcEl.paused && srcEl.currentTime > .2) onEnd();
+    }, 250);
+    const kill = setTimeout(stop, total*1000 + 15000);
+    srcEl.addEventListener('ended', onEnd);
+    srcEl.play().then(schedule).catch(()=>{
       srcEl.muted = true;
-      srcEl.play().then(upd).catch(stop);
+      srcEl.play().then(schedule).catch(stop);
     });
   });
-  await done;
-  await new Promise(r=>setTimeout(r,350));
+
+  await new Promise(r=>setTimeout(r,150));
   const blob = await stopRec();
   ring.setAttribute('stroke-dashoffset','100');
-  srcEl.playbackRate = 1; srcEl.loop = wasLoop; srcEl.muted = true; srcEl.play().catch(()=>{});
+  exporting = false; sizeLocked = false;
+  srcEl.loop = wasLoop; srcEl.muted = true; srcEl.playbackRate = P.speed;
+  srcEl.play().catch(()=>{});
+  applyPreviewSpeed();
   busy = false; document.body.classList.remove('busy'); shutter.disabled = false;
-  if(blob && blob.size) showResult(blob,'video');
+  if(blob && blob.size > 2000) showResult(blob,'video');
   else toast("L'export a échoué. Essayez une définition plus basse.");
 }
 
