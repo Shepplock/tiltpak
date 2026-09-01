@@ -137,6 +137,8 @@ hr{border:0;border-top:1px solid rgba(0,0,0,.12);margin:12px 0}
   opacity:0;pointer-events:none;transition:opacity .2s;max-width:82vw;text-align:center}
 #toast.on{opacity:.96}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+/* iOS refuse d'ouvrir le sélecteur de fichiers et de décoder une vidéo en display:none */
+.vh{position:fixed;left:0;bottom:0;width:2px;height:2px;opacity:.01;z-index:-1;pointer-events:none;border:0;padding:0}
 </style>
 </head>
 <body data-skin="tapis">
@@ -223,10 +225,10 @@ hr{border:0;border-top:1px solid rgba(0,0,0,.12);margin:12px 0}
 </div>
 
 <div id="toast"></div>
-<input type="file" id="pick" accept="video/*" hidden>
-<input type="file" id="pickImg" accept="image/*" hidden>
-<video id="cam" playsinline muted hidden></video>
-<video id="src" playsinline hidden></video>
+<input type="file" id="pick" accept="video/*" class="vh">
+<input type="file" id="pickImg" accept="image/*" class="vh">
+<video id="cam" playsinline webkit-playsinline muted class="vh"></video>
+<video id="src" playsinline webkit-playsinline muted preload="auto" class="vh"></video>
 
 <script>
 'use strict';
@@ -676,16 +678,36 @@ function tick(){
 }
 
 /* ======================= import ======================= */
+let srcObjURL = null;
 $('#pick').addEventListener('change', e=>{
-  const f = e.target.files[0]; if(!f) return;
-  if(srcEl.src) URL.revokeObjectURL(srcEl.src);
-  srcEl.src = URL.createObjectURL(f);
-  srcEl.loop = true; srcEl.muted = true; srcEl.playbackRate = 1;
-  srcEl.play().catch(()=>{});
-  $('#empty').hidden = true; frame.hidden = false;
-  $('#sub').textContent = f.name.slice(0,26);
+  const f = e.target.files && e.target.files[0];
   e.target.value = '';
+  if(f) loadVideo(f);
 });
+function loadVideo(f){
+  if(srcObjURL) URL.revokeObjectURL(srcObjURL);
+  srcObjURL = URL.createObjectURL(f);
+  const em = $('#empty');
+  em.textContent = 'Chargement de ' + f.name.slice(0,24) + '…';
+  em.hidden = false; frame.hidden = true;
+  srcEl.onerror = ()=>{
+    const c = srcEl.error ? srcEl.error.code : 0;
+    em.textContent = c === 4
+      ? "Safari ne sait pas décoder ce fichier. Réglages → Appareil photo → Formats → « Le plus compatible » enregistre en H.264, qui passe partout."
+      : "Impossible d'ouvrir ce fichier (code " + c + ").";
+    em.hidden = false; frame.hidden = true;
+  };
+  srcEl.onloadedmetadata = ()=>{
+    if(!srcEl.videoWidth){ srcEl.onerror(); return; }
+    em.hidden = true; frame.hidden = false;
+    $('#sub').textContent = f.name.slice(0,26);
+    canvas.width = 0;
+    srcEl.play().catch(()=>{});
+  };
+  srcEl.loop = true; srcEl.muted = true; srcEl.playbackRate = 1;
+  srcEl.src = srcObjURL;
+  srcEl.load();
+}
 $('#pickImg').addEventListener('change', e=>{
   const f = e.target.files[0]; if(!f) return;
   const url = URL.createObjectURL(f);
@@ -773,15 +795,23 @@ async function exportVideo(){
   $('#sub').textContent = P.speed>1 ? P.speed+'×' : '';
   const ring = $('#prog circle');
   const done = new Promise(res=>{
+    let finished = false;
+    const stop = ()=>{ if(finished) return; finished = true; clearInterval(guard); res(); };
     const upd = ()=>{
       const p = srcEl.duration ? srcEl.currentTime/srcEl.duration : 0;
       ring.setAttribute('stroke-dashoffset', String(100-p*100));
-      if(!srcEl.ended && recording) requestAnimationFrame(upd);
+      if(!finished && recording) requestAnimationFrame(upd);
     };
-    srcEl.addEventListener('ended', ()=>res(), {once:true});
+    // iOS ne déclenche pas toujours 'ended' à vitesse élevée : on surveille aussi la position.
+    const guard = setInterval(()=>{
+      if(srcEl.ended) stop();
+      else if(srcEl.duration && srcEl.currentTime >= srcEl.duration - .08) stop();
+      else if(srcEl.currentTime > .2 && srcEl.paused) stop();
+    }, 200);
+    srcEl.addEventListener('ended', stop, {once:true});
     srcEl.play().then(upd).catch(()=>{
       srcEl.muted = true;
-      srcEl.play().then(upd).catch(()=>res());
+      srcEl.play().then(upd).catch(stop);
     });
   });
   await done;
@@ -840,6 +870,10 @@ addEventListener('beforeunload', stopCam);
 
 refreshUI();
 setMode('cam');
+
+if('serviceWorker' in navigator && location.protocol === 'https:'){
+  addEventListener('load', ()=> navigator.serviceWorker.register('sw.js').catch(()=>{}));
+}
 </script>
 </body>
 </html>
