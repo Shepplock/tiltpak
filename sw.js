@@ -3,7 +3,7 @@
    dès que tu es en ligne), cache d'abord pour le reste.
    Bump VERSION à chaque mise à jour pour purger l'ancien cache. */
 
-const VERSION = 'tiltpak-1';
+const VERSION = 'tiltpak-3';
 const SHELL = ['./', './index.html'];
 
 self.addEventListener('install', e => {
